@@ -10,8 +10,9 @@ use tabby_common::{
     config::{Config, ModelConfig},
     usage,
 };
-use tabby_inference::ChatCompletionStream;
+use tabby_inference::CompletionStream;
 use tokio::{sync::oneshot::Sender, time::sleep};
+use tabby_inference::ChatCompletionStream;
 use tower_http::timeout::TimeoutLayer;
 use tracing::{debug, warn};
 use utoipa::{
@@ -28,7 +29,6 @@ use crate::{
         completion::{self, create_completion_service_and_chat, CompletionService},
         embedding,
         event::create_event_logger,
-        health,
         model::download_model_if_needed,
         tantivy::IndexReaderProvider,
     },
@@ -52,7 +52,7 @@ Install following IDE / Editor extensions to get started with [Tabby](https://gi
     servers(
         (url = "/", description = "Server"),
     ),
-    paths(routes::log_event, routes::completions, routes::chat_completions_utoipa, routes::health, routes::setting),
+    paths(routes::log_event, routes::completions, routes::setting),
     components(schemas(
         api::event::LogEventRequest,
         completion::CompletionRequest,
@@ -63,8 +63,6 @@ Install following IDE / Editor extensions to get started with [Tabby](https://gi
         completion::Snippet,
         completion::DebugOptions,
         completion::DebugData,
-        health::HealthState,
-        health::Version,
         api::server_setting::ServerSetting,
     )),
     modifiers(&SecurityAddon),
@@ -77,10 +75,6 @@ pub struct ServeArgs {
     #[clap(long)]
     model: Option<String>,
 
-    /// Model id for `/chat/completions` API endpoints.
-    #[clap(long)]
-    chat_model: Option<String>,
-
     #[clap(long, default_value = "0.0.0.0")]
     host: IpAddr,
 
@@ -91,23 +85,10 @@ pub struct ServeArgs {
     #[clap(long, default_value_t=Device::Cpu)]
     device: Device,
 
-    /// Device to run chat model [default equals --device arg]
-    #[clap(long, requires("chat_model"))]
-    chat_device: Option<Device>,
-
     /// Parallelism for model serving - increasing this number will have a significant impact on the
     /// memory requirement e.g., GPU vRAM.
     #[clap(long, default_value_t = 1)]
     parallelism: u8,
-
-    #[cfg(feature = "ee")]
-    #[clap(hide = true, long, default_value_t = false)]
-    #[deprecated(since = "0.11.0", note = "webserver is enabled by default")]
-    webserver: bool,
-
-    #[cfg(feature = "ee")]
-    #[clap(hide = true, long, default_value_t = false)]
-    no_webserver: bool,
 }
 
 pub async fn main(config: &Config, args: &ServeArgs) {
@@ -117,37 +98,9 @@ pub async fn main(config: &Config, args: &ServeArgs) {
 
     let tx = try_run_spinner();
 
-    #[cfg(feature = "ee")]
-    #[allow(deprecated)]
-    if args.webserver {
-        warn!("'--webserver' is enabled by default since 0.11, and will be removed in the next major release. Please remove this flag from your command.");
-    }
-
-    #[allow(unused_assignments)]
-    let mut webserver = None;
-
-    #[cfg(feature = "ee")]
-    {
-        webserver = Some(!args.no_webserver)
-    }
-
     let embedding = embedding::create(&config.model.embedding).await;
 
-    #[cfg(feature = "ee")]
-    let ws = if !args.no_webserver {
-        Some(
-            tabby_webserver::public::Webserver::new(create_event_logger(), embedding.clone()).await,
-        )
-    } else {
-        None
-    };
-
     let mut logger: Arc<dyn EventLogger> = Arc::new(create_event_logger());
-
-    #[cfg(feature = "ee")]
-    if let Some(ws) = &ws {
-        logger = ws.logger();
-    }
 
     let index_reader_provider = Arc::new(IndexReaderProvider::default());
     let docsearch = Arc::new(services::structured_doc::create(
@@ -161,7 +114,7 @@ pub async fn main(config: &Config, args: &ServeArgs) {
     ));
 
     let model = &config.model;
-    let (completion, completion_stream, chat) = create_completion_service_and_chat(
+    let (completion_service, _, chat) = create_completion_service_and_chat(
         &config.completion,
         code.clone(),
         logger.clone(),
@@ -175,47 +128,23 @@ pub async fn main(config: &Config, args: &ServeArgs) {
         &config,
         logger.clone(),
         code.clone(),
-        completion,
-        chat.clone(),
-        webserver,
+        completion_service.map(Arc::new),
+        chat,
     )
     .await;
     let mut ui = Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .fallback(|| async { axum::response::Redirect::temporary("/swagger-ui") });
 
-    #[cfg(feature = "ee")]
-    if let Some(ws) = &ws {
-        let (new_api, new_ui) = ws
-            .attach(
-                &config,
-                api,
-                ui,
-                code,
-                chat,
-                completion_stream,
-                docsearch,
-                |x| Box::new(services::structured_doc::create_serper(x)),
-            )
-            .await;
-        api = new_api;
-        ui = new_ui;
-    };
-
     if let Some(tx) = tx {
         tx.send(())
             .unwrap_or_else(|_| warn!("Spinner channel is closed"));
     }
-    start_heartbeat(args, &config, webserver);
     run_app(api, Some(ui), args.host, args.port).await
 }
 
 async fn load_model(config: &Config) {
     if let Some(ModelConfig::Local(ref model)) = config.model.completion {
-        download_model_if_needed(&model.model_id).await;
-    }
-
-    if let Some(ModelConfig::Local(ref model)) = config.model.chat {
         download_model_if_needed(&model.model_id).await;
     }
 
@@ -229,20 +158,10 @@ async fn api_router(
     config: &Config,
     logger: Arc<dyn EventLogger>,
     _code: Arc<dyn CodeSearch>,
-    completion_state: Option<CompletionService>,
+    completion_state: Option<Arc<CompletionService>>,
     chat_state: Option<Arc<dyn ChatCompletionStream>>,
-    webserver: Option<bool>,
 ) -> Router {
     let mut routers = vec![];
-
-    let health_state = Arc::new(health::HealthState::new(
-        &config.model,
-        &args.device,
-        args.chat_model
-            .as_deref()
-            .map(|_| args.chat_device.as_ref().unwrap_or(&args.device)),
-        webserver,
-    ));
 
     routers.push({
         Router::new()
@@ -250,31 +169,34 @@ async fn api_router(
                 "/v1/events",
                 routing::post(routes::log_event).with_state(logger),
             )
+    });
+
+    routers.push({
+        Router::new()
             .route(
-                "/v1/health",
-                routing::post(routes::health).with_state(health_state.clone()),
+                "/v1/models",
+                routing::get(routes::models).with_state(Arc::new(config.clone().into())),
             )
-            .route(
-                "/v1/health",
-                routing::get(routes::health).with_state(health_state),
-            )
-            .route("/v1beta/models", routing::get(routes::models))
-            .with_state(Arc::new(config.clone().into()))
     });
 
     if let Some(completion_state) = completion_state {
         let mut router = Router::new()
             .route(
                 "/v1/completions",
-                routing::post(routes::completions).with_state(Arc::new(completion_state)),
+                routing::post(routes::completions).with_state(completion_state),
             )
             .layer(TimeoutLayer::new(Duration::from_secs(
                 config.server.completion_timeout,
             )));
 
-        if webserver.is_none() || webserver.is_some_and(|x| !x) {
-            router = router.layer(Extension(AllowedCodeRepository::new_from_config()));
+        if let Some(chat_state) = chat_state {
+            router = router.route(
+                "/v1/chat/completions",
+                routing::post(routes::chat_completions).with_state(chat_state),
+            );
         }
+
+        router = router.layer(Extension(AllowedCodeRepository::new_from_config()));
 
         routers.push(router);
     } else {
@@ -286,46 +208,9 @@ async fn api_router(
         })
     }
 
-    if let Some(chat_state) = chat_state {
-        routers.push({
-            Router::new().route(
-                "/v1/chat/completions",
-                routing::post(routes::chat_completions).with_state(chat_state.clone()),
-            )
-        });
-
-        // For forward compatibility of `/v1beta` route.
-        routers.push({
-            Router::new().route(
-                "/v1beta/chat/completions",
-                routing::post(routes::chat_completions).with_state(chat_state),
-            )
-        });
-    } else {
-        routers.push({
-            Router::new().route(
-                "/v1/chat/completions",
-                routing::post(StatusCode::NOT_IMPLEMENTED),
-            )
-        });
-
-        routers.push({
-            Router::new().route(
-                "/v1beta/chat/completions",
-                routing::post(StatusCode::NOT_IMPLEMENTED),
-            )
-        });
-    }
-
     let server_setting_router =
         Router::new().route("/v1beta/server_setting", routing::get(routes::setting));
 
-    #[cfg(feature = "ee")]
-    if args.no_webserver {
-        routers.push(server_setting_router)
-    }
-
-    #[cfg(not(feature = "ee"))]
     routers.push(server_setting_router);
 
     let mut root = Router::new();
@@ -335,22 +220,6 @@ async fn api_router(
     root
 }
 
-fn start_heartbeat(args: &ServeArgs, config: &Config, webserver: Option<bool>) {
-    let state = Arc::new(health::HealthState::new(
-        &config.model,
-        &args.device,
-        args.chat_model
-            .as_deref()
-            .map(|_| args.chat_device.as_ref().unwrap_or(&args.device)),
-        webserver,
-    ));
-    tokio::spawn(async move {
-        loop {
-            usage::capture("ServeHealth", &state).await;
-            sleep(Duration::from_secs(3000)).await;
-        }
-    });
-}
 
 struct SecurityAddon;
 
@@ -378,17 +247,6 @@ fn merge_args(config: &Config, args: &ServeArgs) -> Config {
         }
         config.model.completion = Some(to_local_config(model, args.parallelism, &args.device));
     };
-
-    if let Some(chat_model) = &args.chat_model {
-        if config.model.chat.is_some() {
-            warn!("Overriding chat model from config.toml. The overriding behavior might surprise you. Consider setting the model in config.toml directly.");
-        }
-        config.model.chat = Some(to_local_config(
-            chat_model,
-            args.parallelism,
-            args.chat_device.as_ref().unwrap_or(&args.device),
-        ));
-    }
 
     config
 }

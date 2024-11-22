@@ -102,9 +102,9 @@ fn init_logging() {
     layers.push(fmt_layer);
 
     let mut dirs = if cfg!(feature = "prod") {
-        "tabby=info,otel=debug,http_api_bindings=info,llama_cpp_server=info".into()
+        "tabby=info,otel=debug,http_api_bindings=info".into()
     } else {
-        "tabby=debug,otel=debug,http_api_bindings=debug,llama_cpp_server=debug".into()
+        "tabby=debug,otel=debug,http_api_bindings=debug".into()
     };
 
     if let Ok(env) = std::env::var(EnvFilter::DEFAULT_ENV) {
@@ -121,16 +121,6 @@ fn init_logging() {
         .init();
 }
 
-fn to_local_config(model: &str, parallelism: u8, device: &Device) -> ModelConfig {
-    let num_gpu_layers = if *device != Device::Cpu {
-        std::env::var("LLAMA_CPP_N_GPU_LAYERS")
-            .map(|s| s.parse::<u16>().ok())
-            .ok()
-            .flatten()
-            .unwrap_or(9999)
-    } else {
-        0
-    };
-
-    ModelConfig::new_local(model, parallelism, num_gpu_layers)
+fn to_local_config(model: &str, parallelism: u8, _device: &Device) -> ModelConfig {
+    ModelConfig::new_local(model, parallelism, 0)
 }

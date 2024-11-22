@@ -166,22 +166,5 @@ mod tests {
             .await;
 
         assert_snapshot!(format!("{:#?}", text_chunks));
-
-        // Second file, tabby-db/src/cache.rs
-        let file_contents2 = include_str!("../../../../ee/tabby-db/src/cache.rs");
-
-        let rust_chunks2 = CodeIntelligence::chunks(file_contents2, "rust")
-            .map(|(_, chunk)| chunk)
-            .collect::<Vec<_>>()
-            .await;
-
-        assert_snapshot!(format!("{:#?}", rust_chunks2));
-
-        let text_chunks2 = CodeIntelligence::chunks(file_contents2, "unknown")
-            .map(|(_, chunk)| chunk)
-            .collect::<Vec<_>>()
-            .await;
-
-        assert_snapshot!(format!("{:#?}", text_chunks2));
     }
 }

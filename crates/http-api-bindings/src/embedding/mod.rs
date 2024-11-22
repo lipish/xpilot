@@ -34,7 +34,6 @@ pub async fn create(config: &HttpModelConfig) -> Arc<dyn Embedding> {
             );
             Arc::new(engine)
         }
-        "ollama/embedding" => ollama_api_bindings::create_embedding(config).await,
         "voyage/embedding" => {
             let engine = VoyageEmbeddingEngine::create(
                 config.api_endpoint.as_deref(),

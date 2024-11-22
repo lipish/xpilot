@@ -55,13 +55,11 @@ pub async fn run_app(api: Router, ui: Option<Router>, host: IpAddr, port: u16) {
 mod chat;
 mod completions;
 mod events;
-mod health;
 mod models;
 mod server_setting;
 
 pub use chat::*;
 pub use completions::*;
 pub use events::*;
-pub use health::*;
 pub use models::*;
 pub use server_setting::*;

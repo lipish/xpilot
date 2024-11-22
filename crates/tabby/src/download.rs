@@ -1,19 +1,18 @@
 use clap::Args;
-use tabby_download::download_model;
-use tracing::info;
+use std::fs;
+use tracing::{info, warn};
 
 #[derive(Args)]
 pub struct DownloadArgs {
-    /// model id to fetch.
+    /// model path to check.
     #[clap(long)]
     model: String,
-
-    /// If true, skip checking for remote model file.
-    #[clap(long, default_value_t = false)]
-    prefer_local_file: bool,
 }
 
 pub async fn main(args: &DownloadArgs) {
-    download_model(&args.model, args.prefer_local_file).await;
-    info!("model '{}' is ready", args.model);
+    if fs::metadata(&args.model).is_ok() {
+        info!("Model exists at local path: {}", args.model);
+    } else {
+        warn!("Model not found at local path: {}", args.model);
+    }
 }
