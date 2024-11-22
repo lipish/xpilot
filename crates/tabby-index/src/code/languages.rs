@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use lazy_static::lazy_static;
 use tree_sitter_tags::TagsConfiguration;
+use tree_sitter_rust;
 
 // Mark TagsConfiguration as thread sync / safe.
 pub(crate) struct TagsConfigurationSync(pub TagsConfiguration);
@@ -16,22 +17,11 @@ lazy_static! {
     static ref LANGUAGE_TAGS: HashMap<&'static str, TagsConfigurationSync> = {
         HashMap::from([
             (
-                "python",
-                TagsConfigurationSync(
-                    TagsConfiguration::new(
-                        tree_sitter_python::language(),
-                        tree_sitter_python::TAGS_QUERY,
-                        "",
-                    )
-                    .unwrap(),
-                ),
-            ),
-            (
                 "rust",
                 TagsConfigurationSync(
                     TagsConfiguration::new(
                         tree_sitter_rust::language(),
-                        include_str!("../../queries/rust.scm"),
+                        tree_sitter_rust::TAGS_QUERY,
                         "",
                     )
                     .unwrap(),

@@ -1,10 +1,4 @@
 [[config]]
-languages = ["python"]
-exts = ["py"]
-line_comment = "#"
-top_level_keywords = ["def", "from", "class", "import"]
-
-[[config]]
 languages = ["rust"]
 exts = ["rs"]
 line_comment = "//"
